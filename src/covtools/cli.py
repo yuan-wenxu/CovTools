@@ -1,0 +1,134 @@
+"""Convert, sort, index and split fixed nine-column coverage files."""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+from .conversion import convert_cov
+from .indexing import DEFAULT_BIN_SIZE, build_index
+from .sorting import DEFAULT_CHUNK_SIZE_MB, sort_cov
+from .splitting import split_cov
+
+
+class CommandHelpFormatter(argparse.HelpFormatter):
+    """List subcommands without repeating their aggregate placeholder."""
+
+    def _format_action(self, action: argparse.Action) -> str:
+        if isinstance(action, argparse._SubParsersAction):
+            return "".join(
+                self._format_action(command)
+                for command in action._get_subactions()
+            )
+        return super()._format_action(action)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(formatter_class=CommandHelpFormatter)
+    commands = parser.add_subparsers(
+        dest="command", required=True, title="commands", metavar="COMMAND",
+    )
+    sort = commands.add_parser(
+        "sort", help="Sort by chromosome, numeric coordinate, then barcode",
+    )
+    index = commands.add_parser("index", help="Build a text .coi index")
+    convert = commands.add_parser(
+        "convert", help="Convert selected columns to the nine-column format",
+    )
+    split = commands.add_parser(
+        "split", help="Split by barcode; keep column 7 as '.' in each output",
+    )
+    for command in (sort, index, convert, split):
+        command.add_argument("--input", type=Path, required=True)
+    sort.add_argument(
+        "--output", type=Path,
+        help="Sorted output (default: <input-stem>.sorted<input-suffix>). "
+        "Existing files are never overwritten.",
+    )
+    sort.add_argument(
+        "--temp-dir", type=Path,
+        help="Parent directory for temporary runs (default: system temp). "
+        "Only the temporary subdirectory created by this command is removed.",
+    )
+    sort.add_argument(
+        "--chunk-size-mb", type=int, default=DEFAULT_CHUNK_SIZE_MB,
+        help="Input MiB per sorting chunk (default: %(default)s). "
+        "Actual RAM usage is higher due to Python objects and sort keys.",
+    )
+    index.add_argument(
+        "--index", type=Path,
+        help="Text index path (default: <input>.coi).",
+    )
+    index.add_argument(
+        "--bin-size", type=int, default=DEFAULT_BIN_SIZE,
+        help="Genomic window size in bases (default: %(default)s). "
+        "Smaller windows reduce query scanning but can enlarge the index.",
+    )
+    convert.add_argument("--output", type=Path)
+    for name in ("barcode", "strand", "context"):
+        convert.add_argument(
+            f"--{name}-col", type=int, metavar="N",
+            help=f"1-based input column containing {name}.",
+        )
+    convert.add_argument(
+        "--barcode",
+        help="Fill missing barcodes ('.' or no column); existing values "
+        "must match, otherwise conversion fails.",
+    )
+    convert.add_argument(
+        "--strand", choices=("+", "-", "."),
+        help="Fill missing strands ('.' or no column); existing values "
+        "must match, otherwise conversion fails.",
+    )
+    convert.add_argument(
+        "--context",
+        help="Fill missing contexts ('.' or no column), e.g. CG; existing "
+        "values must match, otherwise conversion fails.",
+    )
+    split.add_argument("--output-dir", type=Path, required=True)
+    split.add_argument("--max-open-files", type=int, default=64)
+    args = parser.parse_args(sys.argv[1:] or ["--help"])
+    if args.command == "sort" and args.chunk_size_mb < 1:
+        parser.error("--chunk-size-mb must be positive")
+    if args.command == "index" and args.bin_size < 1:
+        parser.error("--bin-size must be positive")
+    if args.command == "convert":
+        columns = (args.barcode_col, args.strand_col, args.context_col)
+        if any(column is not None and column < 1 for column in columns):
+            parser.error("Column selectors must be positive 1-based integers")
+    if args.command == "split" and args.max_open_files < 1:
+        parser.error("--max-open-files must be positive")
+    args.input = args.input.expanduser().resolve()
+    if args.command == "index":
+        args.index = (
+            args.index.expanduser().resolve() if args.index is not None
+            else Path(f"{args.input}.coi")
+        )
+    return args
+
+
+def main() -> None:
+    args = parse_args()
+    try:
+        if args.command == "sort":
+            sort_cov(
+                args.input, args.output, temp_dir=args.temp_dir,
+                chunk_size_bytes=args.chunk_size_mb * 1024**2,
+            )
+        elif args.command == "index":
+            build_index(args.input, args.index, args.bin_size)
+        elif args.command == "convert":
+            convert_cov(
+                args.input, args.output, barcode=args.barcode,
+                strand=args.strand, context=args.context,
+                barcode_col=args.barcode_col, strand_col=args.strand_col,
+                context_col=args.context_col,
+            )
+        else:
+            split_cov(
+                args.input, args.output_dir,
+                max_open_files=args.max_open_files,
+            )
+    except (OSError, ValueError) as error:
+        raise SystemExit(f"Error: {error}") from error

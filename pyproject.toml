@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "covtools"
+version = "0.1.0"
+description = "Lightweight tools for nine-column methylation coverage files"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    {name = "wenxu yuan", email = "yuanwenxu123@gmail.com"},
+]
+dependencies = []
+
+[project.scripts]
+covtools = "covtools.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
