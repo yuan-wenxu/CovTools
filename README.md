@@ -1,7 +1,7 @@
 # CovTools
 
-A lightweight Python package for converting, sorting, indexing, querying,
-and splitting methylation coverage (`.cov`) files by barcode.
+A lightweight Python package for converting, merging, sorting, indexing,
+querying, and splitting methylation coverage (`.cov`) files by barcode.
 
 ## File format
 
@@ -38,6 +38,14 @@ covtools convert --input custom.cov --output custom.normalized.cov \
 covtools convert --input cells.cov --output cells.normalized.cov \
     --barcode-col 7 --strand-col 8 --context CG
 
+# Merge single-cell files and supply literal strand and context values
+covtools merge --input-dir single_cells --output merged.cov \
+    --strand + --context CG
+
+# Merge files with strand and context in input columns 7 and 8
+covtools merge --input-dir single_cells --output merged.cov \
+    --strand-col 7 --context-col 8
+
 # Sort by chromosome (lexicographic), position (numeric), then barcode
 covtools sort --input sample.normalized.cov \
     --output sample.sorted.cov
@@ -49,9 +57,6 @@ covtools index --input sample.sorted.cov --bin-size 100000
 covtools split --input sample.sorted.cov --output-dir split_cells
 ```
 
-Indexing also supports unsorted files; sorting groups nearby positions
-together. Split outputs retain all nine columns, with the barcode in column
-7 replaced by `.`. All write operations refuse to overwrite existing outputs.
 
 ## Python API
 
@@ -61,6 +66,7 @@ from pathlib import Path
 from covtools import (
     build_index,
     convert_cov,
+    merge_cov,
     query_cov,
     sort_cov,
     split_cov,
@@ -88,6 +94,11 @@ normalized = convert_cov(
 )
 normalized = convert_cov(
     "cells.cov", barcode_col=7, strand_col=8, context="CG",
+)
+
+merged = merge_cov("single_cells", "merged.cov", strand="+", context="CG")
+merged = merge_cov(
+    "other_cells", "other.merged.cov", strand_col=7, context_col=8,
 )
 ```
 

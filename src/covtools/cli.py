@@ -1,4 +1,4 @@
-"""Convert, sort, index and split fixed nine-column coverage files."""
+"""Convert, merge, sort, index and split nine-column coverage files."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .conversion import convert_cov
 from .indexing import DEFAULT_BIN_SIZE, build_index
+from .merging import merge_cov
 from .sorting import DEFAULT_CHUNK_SIZE_MB, sort_cov
 from .splitting import split_cov
 
@@ -39,6 +40,14 @@ def parse_args() -> argparse.Namespace:
     split = commands.add_parser(
         "split", help="Split by barcode; keep column 7 as '.' in each output",
     )
+    merge = commands.add_parser(
+        "merge", help="Merge .cov files using filenames as barcodes",
+    )
+    merge.add_argument(
+        "--input-dir", type=Path, required=True,
+        help="Directory to search for *.cov files (nonrecursive).",
+    )
+    merge.add_argument("--output", type=Path, required=True)
     for command in (sort, index, convert, split):
         command.add_argument("--input", type=Path, required=True)
     sort.add_argument(
@@ -66,26 +75,31 @@ def parse_args() -> argparse.Namespace:
         "Smaller windows reduce query scanning but can enlarge the index.",
     )
     convert.add_argument("--output", type=Path)
-    for name in ("barcode", "strand", "context"):
-        convert.add_argument(
-            f"--{name}-col", type=int, metavar="N",
-            help=f"1-based input column containing {name}.",
-        )
+    for command, names in (
+        (convert, ("barcode", "strand", "context")),
+        (merge, ("strand", "context")),
+    ):
+        for name in names:
+            command.add_argument(
+                f"--{name}-col", type=int, metavar="N",
+                help=f"1-based input column containing {name}.",
+            )
     convert.add_argument(
         "--barcode",
         help="Fill missing barcodes ('.' or no column); existing values "
         "must match, otherwise conversion fails.",
     )
-    convert.add_argument(
-        "--strand", choices=("+", "-", "."),
-        help="Fill missing strands ('.' or no column); existing values "
-        "must match, otherwise conversion fails.",
-    )
-    convert.add_argument(
-        "--context",
-        help="Fill missing contexts ('.' or no column), e.g. CG; existing "
-        "values must match, otherwise conversion fails.",
-    )
+    for command in (convert, merge):
+        command.add_argument(
+            "--strand", choices=("+", "-", "."),
+            help="Fill missing strands ('.' or no column); existing values "
+            "must match, otherwise conversion fails.",
+        )
+        command.add_argument(
+            "--context",
+            help="Fill missing contexts ('.' or no column), e.g. CG; existing "
+            "values must match, otherwise conversion fails.",
+        )
     split.add_argument("--output-dir", type=Path, required=True)
     split.add_argument("--max-open-files", type=int, default=64)
     args = parser.parse_args(sys.argv[1:] or ["--help"])
@@ -93,13 +107,16 @@ def parse_args() -> argparse.Namespace:
         parser.error("--chunk-size-mb must be positive")
     if args.command == "index" and args.bin_size < 1:
         parser.error("--bin-size must be positive")
-    if args.command == "convert":
-        columns = (args.barcode_col, args.strand_col, args.context_col)
+    if args.command in ("convert", "merge"):
+        columns = [args.strand_col, args.context_col]
+        if args.command == "convert":
+            columns.append(args.barcode_col)
         if any(column is not None and column < 1 for column in columns):
             parser.error("Column selectors must be positive 1-based integers")
     if args.command == "split" and args.max_open_files < 1:
         parser.error("--max-open-files must be positive")
-    args.input = args.input.expanduser().resolve()
+    if args.command != "merge":
+        args.input = args.input.expanduser().resolve()
     if args.command == "index":
         args.index = (
             args.index.expanduser().resolve() if args.index is not None
@@ -123,6 +140,12 @@ def main() -> None:
                 args.input, args.output, barcode=args.barcode,
                 strand=args.strand, context=args.context,
                 barcode_col=args.barcode_col, strand_col=args.strand_col,
+                context_col=args.context_col,
+            )
+        elif args.command == "merge":
+            merge_cov(
+                args.input_dir, args.output, strand=args.strand,
+                context=args.context, strand_col=args.strand_col,
                 context_col=args.context_col,
             )
         else:
