@@ -1,16 +1,11 @@
-"""Bounded process tasks with deterministic result order and cleanup."""
+"""Bounded native C thread tasks with deterministic order and cleanup."""
 
 from __future__ import annotations
 
-import os
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator
-from concurrent.futures import ProcessPoolExecutor
-from contextlib import contextmanager
-from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 from typing import BinaryIO, TypeVar
-
-from ._common import file_signature
 
 
 Result = TypeVar("Result")
@@ -43,37 +38,6 @@ def _file_ranges(
     return list(zip(boundaries, boundaries[1:])) or [(0, 0)]
 
 
-def _range_lines(source: BinaryIO, start: int, end: int) -> Iterator[bytes]:
-    offset = start
-    while offset < end:
-        line = source.readline()
-        if not line or offset + len(line) > end:
-            raise ValueError("Source changed or has invalid segment boundaries")
-        yield line
-        offset += len(line)
-
-
-@contextmanager
-def _source_range(
-    path: Path, start: int, end: int, signature: tuple[int, int],
-) -> Iterator[Iterator[bytes]]:
-    """Check the source before and after streaming a complete-line segment."""
-    with path.open("rb") as source:
-        if file_signature(os.fstat(source.fileno())) != signature:
-            raise ValueError(
-                f"Source changed before parallel processing: {path}"
-            )
-        source.seek(start)
-        yield _range_lines(source, start, end)
-        if (
-            file_signature(os.fstat(source.fileno())) != signature
-            or file_signature(path.stat()) != signature
-        ):
-            raise ValueError(
-                f"Source changed during parallel processing: {path}"
-            )
-
-
 def _ordered_results(
     function: Callable[..., Result], tasks: Iterable[tuple], workers: int,
 ) -> Iterator[Result]:
@@ -87,7 +51,8 @@ def _ordered_results(
         for arguments in tasks:
             yield function(*arguments)
         return
-    executor = ProcessPoolExecutor(max_workers=workers)
+    executor = ThreadPoolExecutor(max_workers=workers,
+                                  thread_name_prefix="covtools-native")
     pending = deque()
     try:
         for arguments in tasks:

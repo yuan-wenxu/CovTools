@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 import os
-import shutil
 from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import BinaryIO
 
+from . import _native
 from ._common import file_signature
 from ._parallel import _check_workers, _ordered_results
 from ._progress import Progress
-from .conversion import _metadata_options, _normalized_records
+from .conversion import _metadata_options
 
 
 def _merge_source(
@@ -25,17 +25,12 @@ def _merge_source(
         _, barcode_values = _metadata_options(barcode=path.stem)
         if path.stem == ".":
             raise ValueError("Filename must define a nonmissing barcode")
-        with path.open("rb") as source:
-            before = file_signature(os.fstat(source.fileno()))
-            if before != signature:
-                raise ValueError("Source changed before merging")
-            output.writelines(_normalized_records(
-                source, columns, {**values, **barcode_values},
-                progress=progress,
-            ))
-            after = file_signature(os.fstat(source.fileno()))
-            if after != signature or file_signature(path.stat()) != signature:
-                raise ValueError("Source changed while merging")
+        output.flush()
+        _native.convert(
+            os.fsencode(path), output.fileno(), 0, signature[0], *signature,
+            columns, {**values, **barcode_values},
+            progress.advance if progress is not None else None,
+        )
     except ValueError as error:
         raise ValueError(f"{path}: {error}") from error
 
@@ -44,7 +39,7 @@ def _prepare_cell(
     path: Path, destination: Path, columns: dict[str, int],
     values: dict[str, bytes], signature: tuple[int, int],
 ) -> tuple[Path, int]:
-    """Stream one cell into a temporary file in a worker process."""
+    """Convert one cell in a native thread without Python record objects."""
     with destination.open("xb") as output:
         _merge_source(path, output, columns, values, signature)
     return destination, signature[0]
@@ -67,8 +62,8 @@ def _merge_parallel(
         )) as results:
             for number, (prepared, input_bytes) in enumerate(results, 1):
                 progress.label = f"Merge ({number}/{len(paths)} files)"
-                with prepared.open("rb") as source:
-                    shutil.copyfileobj(source, output, length=1024 * 1024)
+                output.flush()
+                _native.copy(os.fsencode(prepared), output.fileno())
                 prepared.unlink()
                 progress.advance(input_bytes)
 

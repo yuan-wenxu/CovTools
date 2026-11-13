@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import argparse
 import sys
-from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 
 from .conversion import convert_cov
 from .indexing import DEFAULT_BIN_SIZE, build_index
 from .merging import merge_cov
-from .sorting import DEFAULT_CHUNK_SIZE_MB, sort_cov
+from .sorting import DEFAULT_CHUNK_SIZE_MB, DEFAULT_MERGE_FAN_IN, sort_cov
 from .splitting import split_cov
 
 
@@ -68,12 +67,17 @@ def parse_args() -> argparse.Namespace:
     sort.add_argument(
         "--chunk-size-mb", type=int, default=DEFAULT_CHUNK_SIZE_MB,
         help="Input MiB per sorting chunk (default: %(default)s). "
-        "Actual RAM usage is higher due to Python objects and sort keys.",
+        "RAM also includes native sort records for each active worker.",
+    )
+    sort.add_argument(
+        "--merge-fan-in", type=int, default=DEFAULT_MERGE_FAN_IN,
+        help="Maximum runs per merge (default: %(default)s), "
+        "capped by the file-descriptor limit.",
     )
     for command in (sort, merge, convert, index, split):
         command.add_argument(
             "--workers", type=int, default=1,
-            help="Number of worker processes (default: %(default)s).",
+            help="Number of native C worker threads (default: %(default)s).",
         )
     for command in (merge, convert, index, split):
         command.add_argument(
@@ -121,6 +125,8 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args(sys.argv[1:] or ["--help"])
     if args.command == "sort" and args.chunk_size_mb < 1:
         parser.error("--chunk-size-mb must be positive")
+    if args.command == "sort" and args.merge_fan_in < 2:
+        parser.error("--merge-fan-in must be at least 2")
     if args.workers < 1:
         parser.error("--workers must be positive")
     if args.command == "index" and args.bin_size < 1:
@@ -151,6 +157,7 @@ def main() -> None:
                 args.input, args.output, temp_dir=args.temp_dir,
                 chunk_size_bytes=args.chunk_size_mb * 1024**2,
                 workers=args.workers,
+                merge_fan_in=args.merge_fan_in,
                 show_progress=not args.quiet,
             )
         elif args.command == "index":
@@ -183,5 +190,5 @@ def main() -> None:
                 workers=args.workers, temp_dir=args.temp_dir,
                 show_progress=not args.quiet,
             )
-    except (OSError, ValueError, BrokenProcessPool) as error:
+    except (OSError, ValueError, OverflowError) as error:
         raise SystemExit(f"Error: {error}") from error

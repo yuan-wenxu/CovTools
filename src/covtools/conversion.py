@@ -3,16 +3,13 @@
 from __future__ import annotations
 
 import os
-import shutil
-from collections.abc import Iterable, Iterator
 from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from ._common import COV_COLUMNS, file_signature, parse_record
-from ._parallel import (
-    _check_workers, _file_ranges, _ordered_results, _source_range,
-)
+from . import _native
+from ._common import file_signature
+from ._parallel import _check_workers, _file_ranges, _ordered_results
 from ._progress import Progress
 
 
@@ -42,50 +39,14 @@ def _metadata_options(
     return columns, values
 
 
-def _normalized_records(
-    source: Iterable[bytes], columns: dict[str, int], values: dict[str, bytes],
-    *, progress: Progress | None = None, start_offset: int = 0,
-) -> Iterator[bytes]:
-    """Stream validated nine-column records, preserving order and duplicates."""
-    minimum_columns = max((6, *columns.values()))
-    offset, rows = start_offset, 0
-    lines = progress.track(source) if progress is not None else source
-    for line in lines:
-        fields = line.rstrip(b"\r\n").split(b"\t")
-        if len(fields) < minimum_columns:
-            raise ValueError(
-                f"Expected at least {minimum_columns} columns at byte {offset}"
-            )
-        metadata = dict.fromkeys(COV_COLUMNS[6:], b".")
-        metadata.update({
-            name: fields[column - 1] for name, column in columns.items()
-        })
-        for name, value in values.items():
-            if metadata[name] not in (b".", value):
-                raise ValueError(f"Conflicting {name} at byte {offset}")
-            metadata[name] = value
-        normalized_fields = fields[:6] + [
-            metadata[name] for name in COV_COLUMNS[6:]
-        ]
-        normalized = b"\t".join(normalized_fields) + b"\n"
-        parse_record(normalized, offset)
-        yield normalized
-        offset += len(line)
-        rows += 1
-    if not rows:
-        raise ValueError("The coverage file is empty")
-
-
 def _convert_range(
     path: Path, destination: Path, start: int, end: int,
     signature: tuple[int, int], columns: dict[str, int],
     values: dict[str, bytes],
 ) -> tuple[Path, int]:
-    with _source_range(path, start, end, signature) as lines:
-        with destination.open("xb") as output:
-            output.writelines(_normalized_records(
-                lines, columns, values, start_offset=start,
-            ))
+    with destination.open("xb") as output:
+        _native.convert(os.fsencode(path), output.fileno(), start, end,
+                        *signature, columns, values)
     return destination, end - start
 
 
@@ -110,7 +71,7 @@ def convert_cov(
     The default output is <input-stem>.covtools<input-suffix>. Source files
     and existing outputs are preserved. Input is uncompressed, tab-separated
     and has no header.
-    workers > 1 converts line-aligned segments through temporary files under
+    workers > 1 converts line-aligned segments with native C threads under
     temp_dir (default: the input file's directory), preserving source order.
     Set show_progress=False to suppress progress on stderr.
     """
@@ -140,9 +101,11 @@ def convert_cov(
                 output,
             ):
                 if workers == 1:
-                    output.writelines(_normalized_records(
-                        source, columns, values, progress=progress,
-                    ))
+                    _native.convert(
+                        os.fsencode(input_path), output.fileno(), 0,
+                        signature[0], *signature, columns, values,
+                        progress.advance,
+                    )
                 else:
                     ranges = _file_ranges(source, signature[0], workers)
                     with TemporaryDirectory(
@@ -157,8 +120,8 @@ def convert_cov(
                             _convert_range, tasks, min(workers, len(ranges)),
                         )) as results:
                             for part, byte_count in results:
-                                with part.open("rb") as converted:
-                                    shutil.copyfileobj(converted, output)
+                                output.flush()
+                                _native.copy(os.fsencode(part), output.fileno())
                                 part.unlink()
                                 progress.advance(byte_count)
                 if (

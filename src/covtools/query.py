@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import os
-import warnings
 from collections.abc import Iterator
 from pathlib import Path
 
-from ._common import file_signature, parse_record
-from .indexing import matching_blocks, read_index_header
+from . import _native
+from .indexing import read_index_header
 
 
 def query_cov(
@@ -39,6 +38,10 @@ def query_cov(
     """
     if not chromosome or start < 1 or end < start:
         raise ValueError("Region coordinates must satisfy 1 <= start <= end")
+    if end > 2**64 - 1:
+        raise OverflowError(
+            "Region coordinates must fit unsigned 64-bit integers"
+        )
     input_path = Path(input_path).expanduser().resolve()
     index_path = (
         Path(index_path).expanduser().resolve() if index_path is not None
@@ -47,43 +50,9 @@ def query_cov(
     barcode_bytes = barcode.encode("utf-8") if barcode is not None else None
     with index_path.open("rb") as index:
         metadata, block_count = read_index_header(index)
-        bin_size = metadata["bin_size"]
-        blocks = matching_blocks(
-            index, chromosome, (start - 1) // bin_size, (end - 1) // bin_size,
-            block_count, metadata["size"],
-        )
-        with input_path.open("rb") as source:
-            signature = file_signature(os.fstat(source.fileno()))
-            if signature[0] != metadata["size"]:
-                raise ValueError("Source size changed; build a new index")
-            if signature[1] != metadata["mtime_ns"]:
-                warnings.warn(
-                    "Source modification time differs from the index; "
-                    "continuing because the file size matches. "
-                    "Ensure the contents are unchanged.",
-                    UserWarning, stacklevel=2,
-                )
-            for block_start, block_end in blocks:
-                source.seek(block_start)
-                offset = block_start
-                while offset < block_end:
-                    line = source.readline()
-                    if not line or offset + len(line) > block_end:
-                        raise ValueError("Source or index has invalid offsets")
-                    fields, position = parse_record(line, offset)
-                    offset += len(line)
-                    if (
-                        fields[0].decode("utf-8") == chromosome
-                        and start <= position <= end
-                    ) and (
-                        barcode_bytes is None
-                        or (len(fields) >= 7 and fields[6] == barcode_bytes)
-                    ):
-                        yield line.decode("utf-8")
-            if (
-                file_signature(os.fstat(source.fileno())) != signature
-                or file_signature(input_path.stat()) != signature
-            ):
-                raise ValueError(
-                    "Source changed while querying; rebuild index"
-                )
+    yield from _native.query(
+        os.fsencode(input_path), os.fsencode(index_path),
+        chromosome.encode("utf-8"), start, end, barcode_bytes,
+        metadata["size"], metadata["mtime_ns"], metadata["bin_size"],
+        block_count,
+    )

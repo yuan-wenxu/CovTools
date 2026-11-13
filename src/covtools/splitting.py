@@ -3,63 +3,16 @@
 from __future__ import annotations
 
 import os
-import shutil
-from collections import OrderedDict
-from collections.abc import Iterable
 from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import BinaryIO
-from urllib.parse import quote, unquote
+from urllib.parse import unquote
 
-from ._common import file_signature, parse_record
-from ._parallel import (
-    _check_workers, _file_ranges, _ordered_results, _source_range,
-)
+from . import _native
+from ._common import file_signature
+from ._parallel import _check_workers, _file_ranges, _ordered_results
 from ._progress import Progress
-
-
-def _split_lines(
-    lines: Iterable[bytes], output_dir: Path, max_open_files: int, *,
-    start_offset: int = 0,
-) -> dict[str, Path]:
-    """Split one segment, closing bounded handles and cleaning partial files."""
-    paths: dict[str, Path] = {}
-    handles: OrderedDict[str, BinaryIO] = OrderedDict()
-    offset = start_offset
-    try:
-        try:
-            for line in lines:
-                fields, _ = parse_record(line, offset)
-                if len(fields) < 7 or fields[6] == b".":
-                    raise ValueError(f"Missing barcode at byte {offset}")
-                barcode = fields[6].decode("utf-8")
-                if barcode not in handles:
-                    if len(handles) >= max_open_files:
-                        _, oldest = handles.popitem(last=False)
-                        oldest.close()
-                    if barcode in paths:
-                        handle = paths[barcode].open("ab")
-                    else:
-                        filename = f"{quote(barcode, safe='')}.cov"
-                        path = output_dir / filename
-                        handle = path.open("xb")
-                        paths[barcode] = path
-                    handles[barcode] = handle
-                handles.move_to_end(barcode)
-                fields[6] = b"."
-                handles[barcode].write(b"\t".join(fields) + b"\n")
-                offset += len(line)
-            if not paths:
-                raise ValueError("The coverage file is empty")
-        finally:
-            for handle in handles.values():
-                handle.close()
-    except BaseException:
-        for path in paths.values():
-            path.unlink()
-        raise
-    return paths
 
 
 def _split_range(
@@ -67,8 +20,8 @@ def _split_range(
     signature: tuple[int, int], max_open_files: int,
 ) -> tuple[Path, int]:
     destination.mkdir()
-    with _source_range(path, start, end, signature) as lines:
-        _split_lines(lines, destination, max_open_files, start_offset=start)
+    _native.split(os.fsencode(path), os.fsencode(destination), start, end,
+                  *signature, max_open_files, False)
     return destination, end - start
 
 
@@ -97,8 +50,8 @@ def _split_parallel(
                         path = output_dir / part.name
                         handle = path.open("xb")
                         paths[barcode] = path
-                    with handle, part.open("rb") as fragment:
-                        shutil.copyfileobj(fragment, handle)
+                    with handle:
+                        _native.copy(os.fsencode(part), handle.fileno())
                     part.unlink()
                 directory.rmdir()
                 progress.advance(byte_count)
@@ -142,9 +95,13 @@ def split_cov(
                 "Split", signature[0], enabled=show_progress,
             ) as progress:
                 if workers == 1:
-                    paths = _split_lines(
-                        progress.track(source), output_dir, max_open_files,
+                    names = _native.split(
+                        os.fsencode(input_path), os.fsencode(output_dir),
+                        0, signature[0], *signature, max_open_files, True,
+                        progress.advance,
                     )
+                    paths = {barcode: output_dir / name
+                             for barcode, name in names.items()}
                 else:
                     _split_parallel(
                         source, input_path, output_dir, paths, signature,

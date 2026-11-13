@@ -2,6 +2,7 @@
 
 A lightweight Python package for converting, merging, sorting, indexing,
 querying, and splitting methylation coverage (`.cov`) files by barcode.
+All record processing uses a compiled C backend on Linux.
 
 ## File format
 
@@ -12,7 +13,7 @@ columns:
 | Column | Field | Description |
 | --- | --- | --- |
 | 1 | chromosome | Chromosome name |
-| 2 | start | 1-based point coordinate |
+| 2 | start | 1-based point coordinate, unsigned 64-bit integer |
 | 3 | end | Same as start |
 | 4 | methylation_percentage | Methylation percentage from 0 to 100 |
 | 5 | methylated_count | Nonnegative integer |

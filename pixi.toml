@@ -9,6 +9,7 @@ version = "0.1.0"
 python = "3.12.*"
 python-build = ">=1"
 setuptools = ">=77"
+c-compiler = ">=1"
 
 [pypi-dependencies]
 covtools = { path = ".", editable = true }

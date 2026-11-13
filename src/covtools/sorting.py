@@ -3,23 +3,24 @@
 from __future__ import annotations
 
 import errno
-import heapq
 import os
+import resource
 import shutil
 import sys
 from collections.abc import Iterator
-from contextlib import ExitStack, closing
+from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import BinaryIO
 
-from ._common import file_signature, parse_record
+from . import _native
+from ._common import file_signature
 from ._parallel import _check_workers, _ordered_results
 from ._progress import Progress
 
 
 DEFAULT_CHUNK_SIZE_MB = 128
-DEFAULT_MERGE_FAN_IN = 32
+DEFAULT_MERGE_FAN_IN = 512
 
 
 def coverage_sort_key(line: bytes) -> tuple[bytes, int, bytes]:
@@ -31,37 +32,33 @@ def coverage_sort_key(line: bytes) -> tuple[bytes, int, bytes]:
 
 def _chunk_tasks(
     source: BinaryIO, temporary_dir: Path, chunk_size_bytes: int,
-) -> Iterator[tuple[list[bytes], Path, int]]:
-    """Read raw chunks lazily so queued data are bounded by worker count."""
-    lines = []
-    offset = chunk_start = chunk_bytes = number = 0
-    for line in source:
-        offset += len(line)
-        chunk_bytes += len(line)
-        lines.append(line)
-        if chunk_bytes >= chunk_size_bytes:
-            yield lines, temporary_dir / f"chunk-{number}.cov", chunk_start
-            number += 1
-            lines = []
-            chunk_start = offset
-            chunk_bytes = 0
-    if lines:
-        yield lines, temporary_dir / f"chunk-{number}.cov", chunk_start
+) -> Iterator[tuple[Path, Path, int, int, tuple[int, int]]]:
+    """Schedule byte ranges; workers read directly without copying records."""
+    signature = file_signature(os.fstat(source.fileno()))
+    input_path = Path(source.name)
+    start = number = 0
+    while start < signature[0]:
+        end = min(signature[0], start + chunk_size_bytes)
+        if end < signature[0]:
+            source.seek(end - 1)
+            if source.read(1) != b"\n":
+                source.readline()
+            end = min(source.tell(), signature[0])
+        yield (input_path, temporary_dir / f"chunk-{number}.cov", start,
+               end, signature)
+        start = end
+        number += 1
 
 
 def _sort_chunk(
-    lines: list[bytes], path: Path, start_offset: int,
+    input_path: Path, path: Path, start: int, end: int,
+    signature: tuple[int, int],
 ) -> tuple[Path, int]:
-    """Validate, normalize and sort one chunk inside its assigned process."""
-    offset = start_offset
-    for number, line in enumerate(lines):
-        parse_record(line, offset)
-        offset += len(line)
-        lines[number] = line.rstrip(b"\r\n") + b"\n"
-    lines.sort(key=coverage_sort_key)
-    with path.open("xb") as output:
-        output.writelines(lines)
-    return path, offset - start_offset
+    """Validate and sort one memory-bounded range in the C extension."""
+    byte_count = _native.sort_chunk(
+        os.fsencode(input_path), os.fsencode(path), start, end, *signature,
+    )
+    return path, byte_count
 
 
 def write_sorted_chunks(
@@ -85,15 +82,11 @@ def merge_sorted_files(
     paths: list[Path], output: BinaryIO, *, progress: Progress | None = None,
 ) -> None:
     """Merge sorted runs without loading their rows into memory."""
-    with ExitStack() as stack:
-        sources = [
-            stack.enter_context(path.open("rb", buffering=256 * 1024))
-            for path in paths
-        ]
-        records = heapq.merge(*sources, key=coverage_sort_key)
-        output.writelines(
-            progress.track(records) if progress is not None else records,
-        )
+    output.flush()
+    _native.merge_runs(
+        [os.fsencode(path) for path in paths], output.fileno(),
+        progress.advance if progress is not None else None,
+    )
 
 
 def _merge_run(paths: list[Path], output_path: Path) -> tuple[Path, int]:
@@ -154,14 +147,20 @@ def sort_cov(
     during merging. They are removed on success or a handled failure.
     temp_dir defaults to the input file's directory. A conservative free-space
     check runs before chunk sorting, including the final output's disk space.
-    workers controls processes for chunk sorting and intermediate merges;
-    the final merge uses one process. At most workers tasks are pending.
-    Chunk memory scales with workers, plus Python and serialization overhead.
+    workers controls native threads for chunk sorting and intermediate merges;
+    the final merge uses one thread. At most workers tasks are pending.
+    Chunk memory includes raw bytes and C sort records and scales with workers.
     Set show_progress=False to suppress progress on stderr.
     """
     if chunk_size_bytes < 1 or merge_fan_in < 2:
         raise ValueError("Chunk size must be positive and merge fan-in >= 2")
     _check_workers(workers)
+    fd_limit = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+    fd_budget = (
+        65536 if fd_limit == resource.RLIM_INFINITY else max(4, fd_limit - 64)
+    )
+    merge_fan_in = min(merge_fan_in, max(2, fd_budget - 1))
+    merge_workers = min(workers, max(1, fd_budget // (merge_fan_in + 1)))
     input_path = Path(input_path).expanduser().resolve()
     output_path = (
         Path(output_path).expanduser().resolve() if output_path is not None
@@ -220,7 +219,7 @@ def sort_cov(
                 enabled=show_progress,
             ) as progress:
                 with closing(_ordered_results(
-                    _merge_run, tasks, min(workers, len(groups)),
+                    _merge_run, tasks, min(merge_workers, len(groups)),
                 )) as results:
                     for group, (merged, byte_count) in zip(groups, results):
                         next_paths.append(merged)

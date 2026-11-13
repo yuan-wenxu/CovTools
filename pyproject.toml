@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "covtools"
 version = "0.1.0"
-description = "Lightweight tools for nine-column methylation coverage files"
+description = "Native coverage processing with Python bindings"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -18,5 +18,21 @@ dependencies = []
 [project.scripts]
 covtools = "covtools.cli:main"
 
+[tool.setuptools]
+include-package-data = false
+
 [tool.setuptools.packages.find]
 where = ["src"]
+namespaces = false
+
+[[tool.setuptools.ext-modules]]
+name = "covtools._native"
+sources = [
+    "src/covtools/native/common.c",
+    "src/covtools/native/core.c",
+    "src/covtools/native/sort.c",
+    "src/covtools/native/query.c",
+    "src/covtools/native/module.c",
+]
+depends = ["src/covtools/native/common.h"]
+extra-compile-args = ["-O3", "-std=c11", "-Wall", "-Wextra"]
