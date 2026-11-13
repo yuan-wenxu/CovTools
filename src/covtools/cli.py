@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 
 from .conversion import convert_cov
@@ -61,7 +62,7 @@ def parse_args() -> argparse.Namespace:
     )
     sort.add_argument(
         "--temp-dir", type=Path,
-        help="Parent directory for temporary runs (default: system temp). "
+        help="Parent directory for temporary runs (default: input directory). "
         "Only the temporary subdirectory created by this command is removed.",
     )
     sort.add_argument(
@@ -69,6 +70,17 @@ def parse_args() -> argparse.Namespace:
         help="Input MiB per sorting chunk (default: %(default)s). "
         "Actual RAM usage is higher due to Python objects and sort keys.",
     )
+    for command in (sort, merge, convert, index, split):
+        command.add_argument(
+            "--workers", type=int, default=1,
+            help="Number of worker processes (default: %(default)s).",
+        )
+    for command in (merge, convert, index, split):
+        command.add_argument(
+            "--temp-dir", type=Path,
+            help="Parent for parallel temporary files "
+            "(default: input directory).",
+        )
     index.add_argument(
         "--index", type=Path,
         help="Text index path (default: <input>.coi).",
@@ -109,6 +121,8 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args(sys.argv[1:] or ["--help"])
     if args.command == "sort" and args.chunk_size_mb < 1:
         parser.error("--chunk-size-mb must be positive")
+    if args.workers < 1:
+        parser.error("--workers must be positive")
     if args.command == "index" and args.bin_size < 1:
         parser.error("--bin-size must be positive")
     if args.command in ("convert", "merge"):
@@ -136,11 +150,13 @@ def main() -> None:
             sort_cov(
                 args.input, args.output, temp_dir=args.temp_dir,
                 chunk_size_bytes=args.chunk_size_mb * 1024**2,
+                workers=args.workers,
                 show_progress=not args.quiet,
             )
         elif args.command == "index":
             build_index(
                 args.input, args.index, args.bin_size,
+                workers=args.workers, temp_dir=args.temp_dir,
                 show_progress=not args.quiet,
             )
         elif args.command == "convert":
@@ -149,6 +165,7 @@ def main() -> None:
                 strand=args.strand, context=args.context,
                 barcode_col=args.barcode_col, strand_col=args.strand_col,
                 context_col=args.context_col,
+                workers=args.workers, temp_dir=args.temp_dir,
                 show_progress=not args.quiet,
             )
         elif args.command == "merge":
@@ -156,13 +173,15 @@ def main() -> None:
                 args.input_dir, args.output, strand=args.strand,
                 context=args.context, strand_col=args.strand_col,
                 context_col=args.context_col,
+                workers=args.workers, temp_dir=args.temp_dir,
                 show_progress=not args.quiet,
             )
         else:
             split_cov(
                 args.input, args.output_dir,
                 max_open_files=args.max_open_files,
+                workers=args.workers, temp_dir=args.temp_dir,
                 show_progress=not args.quiet,
             )
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, BrokenProcessPool) as error:
         raise SystemExit(f"Error: {error}") from error

@@ -5,11 +5,16 @@ from __future__ import annotations
 import json
 import os
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
+from contextlib import closing
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import BinaryIO, TextIO
 
 from ._common import COV_COLUMNS, file_signature, parse_record
+from ._parallel import (
+    _check_workers, _file_ranges, _ordered_results, _source_range,
+)
 from ._progress import Progress
 
 
@@ -25,12 +30,13 @@ def write_block(
 
 
 def scan_blocks(
-    source: BinaryIO, index: TextIO, bin_size: int,
-    *, progress: Progress | None = None,
+    source: Iterable[bytes], index: TextIO, bin_size: int,
+    *, progress: Progress | None = None, start_offset: int = 0,
 ) -> tuple[int, int]:
     """Stream offset blocks to text without assuming coordinate order."""
     current_key = None
-    block_start = offset = row_count = block_count = 0
+    block_start = offset = start_offset
+    row_count = block_count = 0
     lines = progress.track(source) if progress is not None else source
     for line in lines:
         fields, position = parse_record(line, offset)
@@ -50,13 +56,78 @@ def scan_blocks(
     return row_count, block_count + 1
 
 
+def _index_range(
+    path: Path, destination: Path, start: int, end: int,
+    signature: tuple[int, int], bin_size: int,
+) -> tuple[Path, int, int]:
+    with _source_range(path, start, end, signature) as lines:
+        with destination.open("x", encoding="utf-8", newline="\n") as output:
+            rows, _ = scan_blocks(lines, output, bin_size, start_offset=start)
+    return destination, rows, end - start
+
+
+def _parallel_blocks(
+    source: BinaryIO, input_path: Path, index: TextIO,
+    signature: tuple[int, int], bin_size: int, workers: int,
+    temp_dir: Path | None, progress: Progress,
+) -> tuple[int, int]:
+    """Join segment indexes, coalescing windows split by task boundaries."""
+    ranges = _file_ranges(source, signature[0], workers)
+    rows = blocks = 0
+    pending_key = None
+    pending_start = pending_end = 0
+    with TemporaryDirectory(prefix="cov-index-", dir=temp_dir) as temporary:
+        tasks = (
+            (input_path, Path(temporary) / f"part-{number}.coi", start, end,
+             signature, bin_size)
+            for number, (start, end) in enumerate(ranges)
+        )
+        with closing(_ordered_results(
+            _index_range, tasks, min(workers, len(ranges)),
+        )) as results:
+            for part, row_count, byte_count in results:
+                with part.open("rb") as partial_index:
+                    for line in partial_index:
+                        chromosome, window, start, end = (
+                            line.rstrip(b"\n").split(b"\t")
+                        )
+                        key = chromosome, int(window)
+                        if pending_key is not None and key != pending_key:
+                            write_block(
+                                index, pending_key, pending_start, pending_end,
+                            )
+                            blocks += 1
+                        if key != pending_key:
+                            pending_key, pending_start = key, int(start)
+                        pending_end = int(end)
+                part.unlink()
+                rows += row_count
+                progress.advance(byte_count)
+    if pending_key is not None:
+        write_block(index, pending_key, pending_start, pending_end)
+        blocks += 1
+    return rows, blocks
+
+
 def build_index(
     input_path: Path, index_path: Path, bin_size: int, *,
+    workers: int = 1, temp_dir: str | Path | None = None,
     show_progress: bool = True,
 ) -> None:
-    """Index six-to-nine-column coverage; show_progress=False hides progress."""
+    """Index six-to-nine-column coverage, optionally using worker processes.
+
+    Parallel segments produce temporary indexes under temp_dir and are joined
+    in source order. temp_dir defaults to the input file's directory.
+    Adjacent matching windows are coalesced. Set
+    show_progress=False to hide progress.
+    """
     if bin_size < 1:
         raise ValueError("--bin-size must be positive")
+    _check_workers(workers)
+    temporary_parent = (
+        Path(temp_dir).expanduser().resolve()
+        if temp_dir is not None else input_path.resolve().parent
+    )
     with input_path.open("rb", buffering=1024 * 1024) as source:
         if source.read(2) == b"\x1f\x8b":
             raise ValueError("This index requires an uncompressed .cov file")
@@ -84,9 +155,15 @@ def build_index(
                     f"#coi\t{FORMAT_VERSION}\t{json.dumps(metadata)}\n"
                 )
                 index.write(INDEX_COLUMNS.decode("ascii"))
-                rows, blocks = scan_blocks(
-                    source, index, bin_size, progress=progress,
-                )
+                if workers == 1:
+                    rows, blocks = scan_blocks(
+                        source, index, bin_size, progress=progress,
+                    )
+                else:
+                    rows, blocks = _parallel_blocks(
+                        source, input_path, index, signature, bin_size,
+                        workers, temporary_parent, progress,
+                    )
                 if (
                     signature != file_signature(os.fstat(source.fileno()))
                     or signature != file_signature(input_path.stat())

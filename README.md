@@ -23,64 +23,13 @@ columns:
 
 `sort`, `index`, and `query_cov` accept six to nine columns directly. Sorting
 uses chromosome and numeric position, then barcode when column 7 is present.
-Strand and context are carried through unchanged when present. Sorting and
-querying preserve each row's column count; omitted metadata is not filled.
-
-Column positions are fixed. To include context without barcode or strand,
-use `.` placeholders in columns 7 and 8. Empty fields are not accepted.
 `split` requires a nonmissing barcode in column 7 and preserves the input
-column count, replacing barcode with `.`. `convert` and `merge` continue to
-produce the full nine-column format.
+column count, replacing barcode with `.`.
 
 ## Command-line usage
 
 Run `covtools` without arguments to display help, or use
 `covtools <subcommand> --help` for a command's options.
-
-`convert`, `merge`, `sort`, `index`, and `split` display byte progress on
-stderr, including percentage, processing speed, elapsed time, and estimated
-time remaining. Sorting reports each phase separately; merging also shows
-the file count. Add `--quiet` to suppress progress:
-
-```bash
-covtools merge --input-dir single_cells --output merged.cov --quiet
-```
-
-```bash
-# Convert a six-column Bismark file to the standard nine-column format
-covtools convert --input sample.cov --output sample.normalized.cov \
-    --barcode cell01 --strand + --context CG
-
-# Read barcode, strand, and context from custom input columns
-covtools convert --input custom.cov --output custom.normalized.cov \
-    --barcode-col 9 --strand-col 7 --context-col 8
-
-# Read barcode and strand from columns and supply a literal context
-covtools convert --input cells.cov --output cells.normalized.cov \
-    --barcode-col 7 --strand-col 8 --context CG
-
-# Merge single-cell files and supply literal strand and context values
-covtools merge --input-dir single_cells --output merged.cov \
-    --strand + --context CG
-
-# Merge files with strand and context in input columns 7 and 8
-covtools merge --input-dir single_cells --output merged.cov \
-    --strand-col 7 --context-col 8
-
-# Sort by chromosome, numeric position, then barcode when present
-covtools sort --input sample.normalized.cov \
-    --output sample.sorted.cov
-
-# Build a byte-offset index; the default output is sample.sorted.cov.coi
-covtools index --input sample.sorted.cov --bin-size 100000
-
-# Index a six-column Bismark file directly, without converting it first
-covtools index --input sample.cov
-
-# Split by barcode; the output directory must not already exist
-covtools split --input sample.sorted.cov --output-dir split_cells
-```
-
 
 ## Python API
 
@@ -119,19 +68,11 @@ Column selectors are also available through the Python API:
 normalized = convert_cov(
     "custom.cov", barcode_col=9, strand_col=7, context_col=8,
 )
-normalized = convert_cov(
-    "cells.cov", barcode_col=7, strand_col=8, context="CG",
-)
 
 merged = merge_cov("single_cells", "merged.cov", strand="+", context="CG")
-merged = merge_cov(
-    "other_cells", "other.merged.cov", strand_col=7, context_col=8,
-)
 ```
 
-`query_cov` returns an iterator; consume it fully to complete the query.
-It returns the original rows, including six-column rows. A barcode filter
-matches only rows with a barcode column.
-Rebuild the index after modifying the source contents. A file size mismatch
-raises an error; a modification time mismatch only emits a warning and
-continues. Changes to the source file during a query still raise an error.
+Use `workers` with `convert_cov`, `merge_cov`, `sort_cov`, `build_index`, or
+`split_cov` for parallel processing. `query_cov` returns an iterator; consume
+it fully to complete the query. It returns the original rows, including
+six-column rows. A barcode filter matches only rows with a barcode column.

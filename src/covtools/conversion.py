@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+import shutil
+from collections.abc import Iterable, Iterator
+from contextlib import closing
 from pathlib import Path
-from typing import BinaryIO
+from tempfile import TemporaryDirectory
 
 from ._common import COV_COLUMNS, file_signature, parse_record
+from ._parallel import (
+    _check_workers, _file_ranges, _ordered_results, _source_range,
+)
 from ._progress import Progress
 
 
@@ -38,12 +43,12 @@ def _metadata_options(
 
 
 def _normalized_records(
-    source: BinaryIO, columns: dict[str, int], values: dict[str, bytes],
-    *, progress: Progress | None = None,
+    source: Iterable[bytes], columns: dict[str, int], values: dict[str, bytes],
+    *, progress: Progress | None = None, start_offset: int = 0,
 ) -> Iterator[bytes]:
     """Stream validated nine-column records, preserving order and duplicates."""
     minimum_columns = max((6, *columns.values()))
-    offset = rows = 0
+    offset, rows = start_offset, 0
     lines = progress.track(source) if progress is not None else source
     for line in lines:
         fields = line.rstrip(b"\r\n").split(b"\t")
@@ -71,12 +76,26 @@ def _normalized_records(
         raise ValueError("The coverage file is empty")
 
 
+def _convert_range(
+    path: Path, destination: Path, start: int, end: int,
+    signature: tuple[int, int], columns: dict[str, int],
+    values: dict[str, bytes],
+) -> tuple[Path, int]:
+    with _source_range(path, start, end, signature) as lines:
+        with destination.open("xb") as output:
+            output.writelines(_normalized_records(
+                lines, columns, values, start_offset=start,
+            ))
+    return destination, end - start
+
+
 def convert_cov(
     input_path: str | Path, output_path: str | Path | None = None, *,
     barcode: str | None = None, strand: str | None = None,
     context: str | None = None,
     barcode_col: int | None = None, strand_col: int | None = None,
     context_col: int | None = None,
+    workers: int = 1, temp_dir: str | Path | None = None,
     show_progress: bool = True,
 ) -> Path:
     """Convert explicitly mapped columns to the standard nine-column format.
@@ -91,8 +110,11 @@ def convert_cov(
     The default output is <input-stem>.covtools<input-suffix>. Source files
     and existing outputs are preserved. Input is uncompressed, tab-separated
     and has no header.
+    workers > 1 converts line-aligned segments through temporary files under
+    temp_dir (default: the input file's directory), preserving source order.
     Set show_progress=False to suppress progress on stderr.
     """
+    _check_workers(workers)
     columns, values = _metadata_options(
         barcode=barcode, strand=strand, context=context,
         barcode_col=barcode_col, strand_col=strand_col, context_col=context_col,
@@ -104,6 +126,10 @@ def convert_cov(
             f"{input_path.stem}.covtools{input_path.suffix}"
         )
     )
+    temporary_parent = (
+        Path(temp_dir).expanduser().resolve()
+        if temp_dir is not None else input_path.parent
+    )
     with input_path.open("rb") as source:
         signature = file_signature(os.fstat(source.fileno()))
         output = output_path.open("xb")
@@ -113,9 +139,28 @@ def convert_cov(
                 as progress,
                 output,
             ):
-                output.writelines(_normalized_records(
-                    source, columns, values, progress=progress,
-                ))
+                if workers == 1:
+                    output.writelines(_normalized_records(
+                        source, columns, values, progress=progress,
+                    ))
+                else:
+                    ranges = _file_ranges(source, signature[0], workers)
+                    with TemporaryDirectory(
+                        prefix="cov-convert-", dir=temporary_parent,
+                    ) as temporary:
+                        tasks = (
+                            (input_path, Path(temporary) / f"part-{number}.cov",
+                             start, end, signature, columns, values)
+                            for number, (start, end) in enumerate(ranges)
+                        )
+                        with closing(_ordered_results(
+                            _convert_range, tasks, min(workers, len(ranges)),
+                        )) as results:
+                            for part, byte_count in results:
+                                with part.open("rb") as converted:
+                                    shutil.copyfileobj(converted, output)
+                                part.unlink()
+                                progress.advance(byte_count)
                 if (
                     file_signature(os.fstat(source.fileno())) != signature
                     or file_signature(input_path.stat()) != signature

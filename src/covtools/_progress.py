@@ -48,14 +48,20 @@ class Progress:
     def _track(self, records: Iterable[bytes]) -> Iterator[bytes]:
         for record in records:
             yield record
-            self.processed += len(record)
-            if self.processed < self._next_check:
-                continue
-            self._next_check = self.processed + 64 * 1024
-            now = monotonic()
-            if now - self._last_update >= self._interval:
-                self._render(now)
-                self._last_update = now
+            self.advance(len(record))
+
+    def advance(self, byte_count: int) -> None:
+        """Record completed bytes in the parent process only."""
+        if not self.enabled:
+            return
+        self.processed += byte_count
+        if self.processed < self._next_check:
+            return
+        self._next_check = self.processed + 64 * 1024
+        now = monotonic()
+        if now - self._last_update >= self._interval:
+            self._render(now)
+            self._last_update = now
 
     def _render(
         self, now: float, *, final: bool = False, failed: bool = False,
