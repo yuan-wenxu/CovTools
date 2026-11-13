@@ -11,6 +11,7 @@ from tempfile import TemporaryDirectory
 from typing import BinaryIO
 
 from ._common import file_signature, parse_record
+from ._progress import Progress
 
 
 DEFAULT_CHUNK_SIZE_MB = 128
@@ -25,12 +26,14 @@ def coverage_sort_key(line: bytes) -> tuple[bytes, int, bytes]:
 
 def write_sorted_chunks(
     source: BinaryIO, temporary_dir: Path, chunk_size_bytes: int,
+    *, progress: Progress | None = None,
 ) -> list[Path]:
     """Validate rows and spill bounded chunks; normalize line endings to LF."""
     paths = []
     lines = []
     offset = chunk_bytes = 0
-    for line in source:
+    source_lines = progress.track(source) if progress is not None else source
+    for line in source_lines:
         parse_record(line, offset)
         offset += len(line)
         chunk_bytes += len(line)
@@ -43,10 +46,6 @@ def write_sorted_chunks(
             paths.append(path)
             lines.clear()
             chunk_bytes = 0
-            print(
-                f"Sorted {offset / 1024**3:.2f} GiB into {len(paths)} chunks",
-                file=sys.stderr, flush=True,
-            )
     if lines:
         path = temporary_dir / f"chunk-{len(paths)}.cov"
         lines.sort(key=coverage_sort_key)
@@ -58,14 +57,19 @@ def write_sorted_chunks(
     return paths
 
 
-def merge_sorted_files(paths: list[Path], output: BinaryIO) -> None:
+def merge_sorted_files(
+    paths: list[Path], output: BinaryIO, *, progress: Progress | None = None,
+) -> None:
     """Merge sorted runs without loading their rows into memory."""
     with ExitStack() as stack:
         sources = [
             stack.enter_context(path.open("rb", buffering=256 * 1024))
             for path in paths
         ]
-        output.writelines(heapq.merge(*sources, key=coverage_sort_key))
+        records = heapq.merge(*sources, key=coverage_sort_key)
+        output.writelines(
+            progress.track(records) if progress is not None else records,
+        )
 
 
 def sort_cov(
@@ -73,6 +77,7 @@ def sort_cov(
     temp_dir: str | Path | None = None,
     chunk_size_bytes: int = DEFAULT_CHUNK_SIZE_MB * 1024**2,
     merge_fan_in: int = DEFAULT_MERGE_FAN_IN,
+    show_progress: bool = True,
 ) -> Path:
     """Externally sort a nine-column file, returning the new output path.
 
@@ -85,6 +90,7 @@ def sort_cov(
     merge_fan_in limits simultaneously open runs; larger inputs use multiple
     merge passes. Temporary runs can occupy about twice the source size
     during merging. They are removed on success or a handled failure.
+    Set show_progress=False to suppress progress on stderr.
     """
     if chunk_size_bytes < 1 or merge_fan_in < 2:
         raise ValueError("Chunk size must be positive and merge fan-in >= 2")
@@ -109,41 +115,54 @@ def sort_cov(
             if source.read(2) == b"\x1f\x8b":
                 raise ValueError("Sorting requires an uncompressed .cov file")
             source.seek(0)
-            paths = write_sorted_chunks(
-                source, temporary_dir, chunk_size_bytes,
-            )
-            if file_signature(os.fstat(source.fileno())) != signature:
-                raise ValueError("Source changed while sorting")
-        if file_signature(input_path.stat()) != signature:
-            raise ValueError("Source changed while sorting")
+            with Progress(
+                "Sort: chunks", signature[0], enabled=show_progress,
+            ) as progress:
+                paths = write_sorted_chunks(
+                    source, temporary_dir, chunk_size_bytes, progress=progress,
+                )
+                if (
+                    file_signature(os.fstat(source.fileno())) != signature
+                    or file_signature(input_path.stat()) != signature
+                ):
+                    raise ValueError("Source changed while sorting")
         merge_pass = 0
         while len(paths) > merge_fan_in:
             next_paths = []
-            for start in range(0, len(paths), merge_fan_in):
-                group = paths[start:start + merge_fan_in]
-                merged = temporary_dir / (
-                    f"merge-{merge_pass}-{len(next_paths)}.cov"
-                )
-                with merged.open("xb") as output:
-                    merge_sorted_files(group, output)
-                next_paths.append(merged)
-                for path in group:
-                    path.unlink()
-                print(
-                    f"Merged pass {merge_pass + 1}, group {len(next_paths)}",
-                    file=sys.stderr, flush=True,
-                )
+            with Progress(
+                f"Sort: merge pass {merge_pass + 1}",
+                sum(path.stat().st_size for path in paths),
+                enabled=show_progress,
+            ) as progress:
+                for start in range(0, len(paths), merge_fan_in):
+                    group = paths[start:start + merge_fan_in]
+                    merged = temporary_dir / (
+                        f"merge-{merge_pass}-{len(next_paths)}.cov"
+                    )
+                    with merged.open("xb") as output:
+                        merge_sorted_files(group, output, progress=progress)
+                    next_paths.append(merged)
+                    for path in group:
+                        path.unlink()
             paths = next_paths
             merge_pass += 1
         # Open exclusively outside the cleanup block: never unlink user files.
         output = output_path.open("xb")
         try:
-            with output:
-                merge_sorted_files(paths, output)
+            with (
+                Progress(
+                    "Sort: final merge",
+                    sum(path.stat().st_size for path in paths),
+                    enabled=show_progress,
+                ) as progress,
+                output,
+            ):
+                merge_sorted_files(paths, output, progress=progress)
                 if file_signature(input_path.stat()) != signature:
                     raise ValueError("Source changed while sorting")
         except BaseException:
             output_path.unlink()
             raise
-    print(f"Wrote sorted coverage: {output_path}", file=sys.stderr)
+    if show_progress:
+        print(f"Wrote sorted coverage: {output_path}", file=sys.stderr)
     return output_path

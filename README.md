@@ -25,6 +25,15 @@ and no header:
 Run `covtools` without arguments to display help, or use
 `covtools <subcommand> --help` for a command's options.
 
+`convert`, `merge`, `sort`, `index`, and `split` display byte progress on
+stderr, including percentage, processing speed, elapsed time, and estimated
+time remaining. Sorting reports each phase separately; merging also shows
+the file count. Add `--quiet` to suppress progress:
+
+```bash
+covtools merge --input-dir single_cells --output merged.cov --quiet
+```
+
 ```bash
 # Convert a six-column Bismark file to the standard nine-column format
 covtools convert --input sample.cov --output sample.normalized.cov \
@@ -59,6 +68,9 @@ covtools split --input sample.sorted.cov --output-dir split_cells
 
 
 ## Python API
+
+Pass `show_progress=False` to `convert_cov`, `merge_cov`, `sort_cov`,
+`build_index`, or `split_cov` to suppress progress output.
 
 ```python
 from pathlib import Path

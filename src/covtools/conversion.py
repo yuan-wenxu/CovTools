@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from ._common import COV_COLUMNS, file_signature, parse_record
+from ._progress import Progress
 
 
 def _metadata_options(
@@ -38,11 +39,13 @@ def _metadata_options(
 
 def _normalized_records(
     source: BinaryIO, columns: dict[str, int], values: dict[str, bytes],
+    *, progress: Progress | None = None,
 ) -> Iterator[bytes]:
     """Stream validated nine-column records, preserving order and duplicates."""
     minimum_columns = max((6, *columns.values()))
     offset = rows = 0
-    for line in source:
+    lines = progress.track(source) if progress is not None else source
+    for line in lines:
         fields = line.rstrip(b"\r\n").split(b"\t")
         if len(fields) < minimum_columns:
             raise ValueError(
@@ -74,6 +77,7 @@ def convert_cov(
     context: str | None = None,
     barcode_col: int | None = None, strand_col: int | None = None,
     context_col: int | None = None,
+    show_progress: bool = True,
 ) -> Path:
     """Convert explicitly mapped columns to the standard nine-column format.
 
@@ -87,6 +91,7 @@ def convert_cov(
     The default output is <input-stem>.covtools<input-suffix>. Source files
     and existing outputs are preserved. Input is uncompressed, tab-separated
     and has no header.
+    Set show_progress=False to suppress progress on stderr.
     """
     columns, values = _metadata_options(
         barcode=barcode, strand=strand, context=context,
@@ -103,8 +108,14 @@ def convert_cov(
         signature = file_signature(os.fstat(source.fileno()))
         output = output_path.open("xb")
         try:
-            with output:
-                output.writelines(_normalized_records(source, columns, values))
+            with (
+                Progress("Convert", signature[0], enabled=show_progress)
+                as progress,
+                output,
+            ):
+                output.writelines(_normalized_records(
+                    source, columns, values, progress=progress,
+                ))
                 if (
                     file_signature(os.fstat(source.fileno())) != signature
                     or file_signature(input_path.stat()) != signature

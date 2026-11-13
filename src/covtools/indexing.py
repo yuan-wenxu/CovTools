@@ -10,11 +10,11 @@ from pathlib import Path
 from typing import BinaryIO, TextIO
 
 from ._common import COV_COLUMNS, file_signature, parse_record
+from ._progress import Progress
 
 
 FORMAT_VERSION = 1
 DEFAULT_BIN_SIZE = 100_000
-PROGRESS_BYTES = 256 * 1024 * 1024
 INDEX_COLUMNS = b"#chromosome\twindow\tstart_offset\tend_offset\n"
 
 
@@ -26,13 +26,13 @@ def write_block(
 
 def scan_blocks(
     source: BinaryIO, index: TextIO, bin_size: int,
+    *, progress: Progress | None = None,
 ) -> tuple[int, int]:
     """Stream offset blocks to text without assuming coordinate order."""
     current_key = None
     block_start = offset = row_count = block_count = 0
-    next_progress = PROGRESS_BYTES
-
-    for line in source:
+    lines = progress.track(source) if progress is not None else source
+    for line in lines:
         fields, position = parse_record(line, offset)
         key = (fields[0], (position - 1) // bin_size)
         if key != current_key:
@@ -44,20 +44,17 @@ def scan_blocks(
         offset += len(line)
         row_count += 1
 
-        if offset >= next_progress:
-            print(
-                f"Scanned {offset / 1024**3:.2f} GiB; {row_count:,} rows",
-                file=sys.stderr, flush=True,
-            )
-            next_progress = offset + PROGRESS_BYTES
-
     if current_key is None:
         raise ValueError("The coverage file is empty")
     write_block(index, current_key, block_start, offset)
     return row_count, block_count + 1
 
 
-def build_index(input_path: Path, index_path: Path, bin_size: int) -> None:
+def build_index(
+    input_path: Path, index_path: Path, bin_size: int, *,
+    show_progress: bool = True,
+) -> None:
+    """Build an index; set show_progress=False to suppress stderr progress."""
     if bin_size < 1:
         raise ValueError("--bin-size must be positive")
     with input_path.open("rb", buffering=1024 * 1024) as source:
@@ -77,12 +74,18 @@ def build_index(input_path: Path, index_path: Path, bin_size: int) -> None:
             "x", encoding="utf-8", newline="\n", buffering=1024 * 1024,
         )
         try:
-            with index:
+            with (
+                Progress("Index", signature[0], enabled=show_progress)
+                as progress,
+                index,
+            ):
                 index.write(
                     f"#coi\t{FORMAT_VERSION}\t{json.dumps(metadata)}\n"
                 )
                 index.write(INDEX_COLUMNS.decode("ascii"))
-                rows, blocks = scan_blocks(source, index, bin_size)
+                rows, blocks = scan_blocks(
+                    source, index, bin_size, progress=progress,
+                )
                 if (
                     signature != file_signature(os.fstat(source.fileno()))
                     or signature != file_signature(input_path.stat())
@@ -92,10 +95,11 @@ def build_index(input_path: Path, index_path: Path, bin_size: int) -> None:
         except BaseException:
             index_path.unlink()
             raise
-    print(
-        f"Indexed {rows:,} rows in {blocks:,} blocks: {index_path}",
-        file=sys.stderr,
-    )
+    if show_progress:
+        print(
+            f"Indexed {rows:,} rows in {blocks:,} blocks: {index_path}",
+            file=sys.stderr,
+        )
 
 
 def read_index_header(index: BinaryIO) -> tuple[dict, int]:

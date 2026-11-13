@@ -48,6 +48,10 @@ def parse_args() -> argparse.Namespace:
         help="Directory to search for *.cov files (nonrecursive).",
     )
     merge.add_argument("--output", type=Path, required=True)
+    for command in (sort, index, convert, split, merge):
+        command.add_argument(
+            "--quiet", action="store_true", help="Hide progress output.",
+        )
     for command in (sort, index, convert, split):
         command.add_argument("--input", type=Path, required=True)
     sort.add_argument(
@@ -132,26 +136,33 @@ def main() -> None:
             sort_cov(
                 args.input, args.output, temp_dir=args.temp_dir,
                 chunk_size_bytes=args.chunk_size_mb * 1024**2,
+                show_progress=not args.quiet,
             )
         elif args.command == "index":
-            build_index(args.input, args.index, args.bin_size)
+            build_index(
+                args.input, args.index, args.bin_size,
+                show_progress=not args.quiet,
+            )
         elif args.command == "convert":
             convert_cov(
                 args.input, args.output, barcode=args.barcode,
                 strand=args.strand, context=args.context,
                 barcode_col=args.barcode_col, strand_col=args.strand_col,
                 context_col=args.context_col,
+                show_progress=not args.quiet,
             )
         elif args.command == "merge":
             merge_cov(
                 args.input_dir, args.output, strand=args.strand,
                 context=args.context, strand_col=args.strand_col,
                 context_col=args.context_col,
+                show_progress=not args.quiet,
             )
         else:
             split_cov(
                 args.input, args.output_dir,
                 max_open_files=args.max_open_files,
+                show_progress=not args.quiet,
             )
     except (OSError, ValueError) as error:
         raise SystemExit(f"Error: {error}") from error

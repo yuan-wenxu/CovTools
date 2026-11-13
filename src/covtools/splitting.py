@@ -9,11 +9,13 @@ from typing import BinaryIO
 from urllib.parse import quote
 
 from ._common import file_signature, parse_record
+from ._progress import Progress
 
 
 def split_cov(
     input_path: str | Path, output_dir: str | Path, *,
     max_open_files: int = 64,
+    show_progress: bool = True,
 ) -> dict[str, Path]:
     """Split by column 7 into a new directory, returning barcode-to-path map.
 
@@ -22,6 +24,7 @@ def split_cov(
     Filenames are URL-encoded barcodes plus '.cov'. File handles are bounded
     even when input barcodes are interleaved. An existing output directory
     is never reused; on failure only outputs created by this call are removed.
+    Set show_progress=False to suppress progress on stderr.
     """
     if max_open_files < 1:
         raise ValueError("max_open_files must be positive")
@@ -33,39 +36,44 @@ def split_cov(
         signature = file_signature(os.fstat(source.fileno()))
         output_dir.mkdir()
         try:
-            offset = 0
-            try:
-                for line in source:
-                    fields, _ = parse_record(line, offset)
-                    barcode = fields[6].decode("utf-8")
-                    if barcode == ".":
-                        raise ValueError(f"Missing barcode at byte {offset}")
-                    if barcode not in handles:
-                        if len(handles) >= max_open_files:
-                            _, oldest = handles.popitem(last=False)
-                            oldest.close()
-                        if barcode in paths:
-                            handle = paths[barcode].open("ab")
-                        else:
-                            filename = f"{quote(barcode, safe='')}.cov"
-                            path = output_dir / filename
-                            handle = path.open("xb")
-                            paths[barcode] = path
-                        handles[barcode] = handle
-                    handles.move_to_end(barcode)
-                    fields[6] = b"."
-                    handles[barcode].write(b"\t".join(fields) + b"\n")
-                    offset += len(line)
-                if not paths:
-                    raise ValueError("The coverage file is empty")
-                if (
-                    file_signature(os.fstat(source.fileno())) != signature
-                    or file_signature(input_path.stat()) != signature
-                ):
-                    raise ValueError("Source changed while splitting")
-            finally:
-                for handle in handles.values():
-                    handle.close()
+            with Progress(
+                "Split", signature[0], enabled=show_progress,
+            ) as progress:
+                offset = 0
+                try:
+                    for line in progress.track(source):
+                        fields, _ = parse_record(line, offset)
+                        barcode = fields[6].decode("utf-8")
+                        if barcode == ".":
+                            raise ValueError(
+                                f"Missing barcode at byte {offset}"
+                            )
+                        if barcode not in handles:
+                            if len(handles) >= max_open_files:
+                                _, oldest = handles.popitem(last=False)
+                                oldest.close()
+                            if barcode in paths:
+                                handle = paths[barcode].open("ab")
+                            else:
+                                filename = f"{quote(barcode, safe='')}.cov"
+                                path = output_dir / filename
+                                handle = path.open("xb")
+                                paths[barcode] = path
+                            handles[barcode] = handle
+                        handles.move_to_end(barcode)
+                        fields[6] = b"."
+                        handles[barcode].write(b"\t".join(fields) + b"\n")
+                        offset += len(line)
+                    if not paths:
+                        raise ValueError("The coverage file is empty")
+                    if (
+                        file_signature(os.fstat(source.fileno())) != signature
+                        or file_signature(input_path.stat()) != signature
+                    ):
+                        raise ValueError("Source changed while splitting")
+                finally:
+                    for handle in handles.values():
+                        handle.close()
         except BaseException:
             for path in paths.values():
                 path.unlink()

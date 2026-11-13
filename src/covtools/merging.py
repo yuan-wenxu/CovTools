@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 from ._common import file_signature
+from ._progress import Progress
 from .conversion import _metadata_options, _normalized_records
 
 
@@ -13,6 +14,7 @@ def merge_cov(
     input_dir: str | Path, output_path: str | Path, *,
     strand: str | None = None, context: str | None = None,
     strand_col: int | None = None, context_col: int | None = None,
+    show_progress: bool = True,
 ) -> Path:
     """Merge immediate *.cov files into a new nine-column output.
 
@@ -25,6 +27,7 @@ def merge_cov(
     Input must be uncompressed and have no header. Empty or malformed inputs
     raise ValueError. Sources and existing outputs are preserved; failures
     remove only the output created by this call. Returns the output path.
+    Set show_progress=False to suppress progress on stderr.
     """
     columns, values = _metadata_options(
         strand=strand, context=context,
@@ -40,11 +43,16 @@ def merge_cov(
     if not paths:
         raise ValueError(f"No .cov files found in {input_dir}")
     signatures = {path: file_signature(path.stat()) for path in paths}
+    total_bytes = sum(signature[0] for signature in signatures.values())
     # Discover inputs before creating output, including when it is in input_dir.
     output = output_path.open("xb")
     try:
-        with output:
-            for path in paths:
+        with (
+            Progress("Merge", total_bytes, enabled=show_progress) as progress,
+            output,
+        ):
+            for number, path in enumerate(paths, 1):
+                progress.label = f"Merge ({number}/{len(paths)} files)"
                 try:
                     _, barcode_values = _metadata_options(barcode=path.stem)
                     if path.stem == ".":
@@ -58,6 +66,7 @@ def merge_cov(
                             raise ValueError("Source changed before merging")
                         output.writelines(_normalized_records(
                             source, columns, {**values, **barcode_values},
+                            progress=progress,
                         ))
                         after = file_signature(os.fstat(source.fileno()))
                         if (
