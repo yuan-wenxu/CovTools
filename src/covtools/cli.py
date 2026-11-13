@@ -1,4 +1,4 @@
-"""Convert, merge, sort, index and split nine-column coverage files."""
+"""Process coverage files with six required and three optional columns."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ def parse_args() -> argparse.Namespace:
         dest="command", required=True, title="commands", metavar="COMMAND",
     )
     sort = commands.add_parser(
-        "sort", help="Sort by chromosome, numeric coordinate, then barcode",
+        "sort", help="Sort by chromosome, coordinate, then barcode if present",
     )
     index = commands.add_parser("index", help="Build a text .coi index")
     convert = commands.add_parser(

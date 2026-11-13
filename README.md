@@ -5,8 +5,9 @@ querying, and splitting methylation coverage (`.cov`) files by barcode.
 
 ## File format
 
-The standard format is an uncompressed, tab-separated file with nine columns
-and no header:
+Input is an uncompressed, tab-separated file with no header. The first six
+columns are required; barcode, strand, and context are optional trailing
+columns:
 
 | Column | Field | Description |
 | --- | --- | --- |
@@ -16,9 +17,20 @@ and no header:
 | 4 | methylation_percentage | Methylation percentage from 0 to 100 |
 | 5 | methylated_count | Nonnegative integer |
 | 6 | unmethylated_count | Nonnegative integer |
-| 7 | barcode | Use `.` for missing values |
-| 8 | strand | `+`, `-`, or `.` |
-| 9 | context | For example, `CG`; use `.` for missing values |
+| 7 | barcode | Optional; use `.` for missing values |
+| 8 | strand | Optional; `+`, `-`, or `.` |
+| 9 | context | Optional; for example, `CG`; use `.` for missing values |
+
+`sort`, `index`, and `query_cov` accept six to nine columns directly. Sorting
+uses chromosome and numeric position, then barcode when column 7 is present.
+Strand and context are carried through unchanged when present. Sorting and
+querying preserve each row's column count; omitted metadata is not filled.
+
+Column positions are fixed. To include context without barcode or strand,
+use `.` placeholders in columns 7 and 8. Empty fields are not accepted.
+`split` requires a nonmissing barcode in column 7 and preserves the input
+column count, replacing barcode with `.`. `convert` and `merge` continue to
+produce the full nine-column format.
 
 ## Command-line usage
 
@@ -55,12 +67,15 @@ covtools merge --input-dir single_cells --output merged.cov \
 covtools merge --input-dir single_cells --output merged.cov \
     --strand-col 7 --context-col 8
 
-# Sort by chromosome (lexicographic), position (numeric), then barcode
+# Sort by chromosome, numeric position, then barcode when present
 covtools sort --input sample.normalized.cov \
     --output sample.sorted.cov
 
 # Build a byte-offset index; the default output is sample.sorted.cov.coi
 covtools index --input sample.sorted.cov --bin-size 100000
+
+# Index a six-column Bismark file directly, without converting it first
+covtools index --input sample.cov
 
 # Split by barcode; the output directory must not already exist
 covtools split --input sample.sorted.cov --output-dir split_cells
@@ -115,6 +130,8 @@ merged = merge_cov(
 ```
 
 `query_cov` returns an iterator; consume it fully to complete the query.
+It returns the original rows, including six-column rows. A barcode filter
+matches only rows with a barcode column.
 Rebuild the index after modifying the source contents. A file size mismatch
 raises an error; a modification time mismatch only emits a warning and
 continues. Changes to the source file during a query still raise an error.

@@ -1,4 +1,4 @@
-"""Split nine-column coverage files by barcode, keeping column 7 as '.'."""
+"""Split coverage files with barcode in column 7, keeping that column as '.'."""
 
 from __future__ import annotations
 
@@ -19,8 +19,9 @@ def split_cov(
 ) -> dict[str, Path]:
     """Split by column 7 into a new directory, returning barcode-to-path map.
 
-    Every output retains nine columns: barcode becomes '.', while strand and
-    context retain columns 8 and 9. Rows with missing barcode are rejected.
+    Every output retains its input columns: barcode becomes '.', while strand
+    and context are preserved when present. Rows with fewer than seven
+    columns or a missing barcode are rejected.
     Filenames are URL-encoded barcodes plus '.cov'. File handles are bounded
     even when input barcodes are interleaved. An existing output directory
     is never reused; on failure only outputs created by this call are removed.
@@ -43,11 +44,11 @@ def split_cov(
                 try:
                     for line in progress.track(source):
                         fields, _ = parse_record(line, offset)
-                        barcode = fields[6].decode("utf-8")
-                        if barcode == ".":
+                        if len(fields) < 7 or fields[6] == b".":
                             raise ValueError(
                                 f"Missing barcode at byte {offset}"
                             )
+                        barcode = fields[6].decode("utf-8")
                         if barcode not in handles:
                             if len(handles) >= max_open_files:
                                 _, oldest = handles.popitem(last=False)

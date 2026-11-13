@@ -17,16 +17,17 @@ def file_signature(stat: os.stat_result) -> tuple[int, int]:
 
 
 def parse_record(line: bytes, offset: int) -> tuple[list[bytes], int]:
-    """Validate the fixed nine-column covtools format; '.' means missing."""
+    """Validate six required columns and optional trailing metadata."""
     fields = line.rstrip(b"\r\n").split(b"\t")
     try:
         if (
-            len(fields) != len(COV_COLUMNS)
+            not 6 <= len(fields) <= len(COV_COLUMNS)
             or any(not field for field in fields)
         ):
             raise ValueError(
-                "Expected nine nonempty tab-separated columns; "
-                "use convert for legacy files and '.' for missing metadata"
+                "Expected six to nine nonempty tab-separated columns; "
+                "optional columns are barcode, strand, context in that order; "
+                "use '.' for missing metadata within the row"
             )
         position = int(fields[1])
         if position < 1 or int(fields[2]) != position:
@@ -38,7 +39,7 @@ def parse_record(line: bytes, offset: int) -> tuple[list[bytes], int]:
             raise ValueError(
                 "Methylated/unmethylated counts must be nonnegative"
             )
-        if fields[7] not in (b"+", b"-", b"."):
+        if len(fields) >= 8 and fields[7] not in (b"+", b"-", b"."):
             raise ValueError("Strand in column 8 must be '+', '-' or '.'")
     except ValueError as error:
         raise ValueError(

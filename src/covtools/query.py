@@ -15,10 +15,12 @@ def query_cov(
     input_path: str | Path, chromosome: str, start: int, end: int, *,
     index_path: str | Path | None = None, barcode: str | None = None,
 ) -> Iterator[str]:
-    """Yield nine-column lines overlapping a 1-based inclusive region.
+    """Yield six-to-nine-column lines in a 1-based inclusive region.
 
     The default index is <input_path>.coi. Optionally match column 7 exactly
     with barcode. Lines retain their original endings, duplicates, and order.
+    Rows without a barcode column do not match a barcode filter. Optional
+    columns are preserved without filling omitted fields.
     This generator scans the text index, then seeks only to candidate data
     blocks. It writes no output and does not load the coverage file in memory.
     Consume the iterator to perform the query and final consistency checks.
@@ -75,7 +77,7 @@ def query_cov(
                         and start <= position <= end
                     ) and (
                         barcode_bytes is None
-                        or fields[6] == barcode_bytes
+                        or (len(fields) >= 7 and fields[6] == barcode_bytes)
                     ):
                         yield line.decode("utf-8")
             if (

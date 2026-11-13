@@ -54,7 +54,7 @@ def build_index(
     input_path: Path, index_path: Path, bin_size: int, *,
     show_progress: bool = True,
 ) -> None:
-    """Build an index; set show_progress=False to suppress stderr progress."""
+    """Index six-to-nine-column coverage; show_progress=False hides progress."""
     if bin_size < 1:
         raise ValueError("--bin-size must be positive")
     with input_path.open("rb", buffering=1024 * 1024) as source:
@@ -63,6 +63,7 @@ def build_index(
         source.seek(0)
         signature = file_signature(os.fstat(source.fileno()))
         metadata = {
+            # Canonical field order; the last three columns may be omitted.
             "columns": list(COV_COLUMNS),
             "source": str(input_path),
             "size": signature[0],

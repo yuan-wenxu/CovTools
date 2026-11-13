@@ -19,9 +19,10 @@ DEFAULT_MERGE_FAN_IN = 32
 
 
 def coverage_sort_key(line: bytes) -> tuple[bytes, int, bytes]:
-    """Use lexicographic chromosome/barcode and numeric genomic position."""
+    """Sort by chromosome, numeric position and barcode when present."""
     fields = line.rstrip(b"\r\n").split(b"\t")
-    return fields[0], int(fields[1]), fields[6]
+    barcode = fields[6] if len(fields) >= 7 else b""
+    return fields[0], int(fields[1]), barcode
 
 
 def write_sorted_chunks(
@@ -79,10 +80,12 @@ def sort_cov(
     merge_fan_in: int = DEFAULT_MERGE_FAN_IN,
     show_progress: bool = True,
 ) -> Path:
-    """Externally sort a nine-column file, returning the new output path.
+    """Externally sort a six-to-nine-column file, returning the output path.
 
     Sort order is chromosome (lexicographic), position (numeric), then barcode
-    (lexicographic). Equal keys retain input order, including duplicate rows.
+    (lexicographic) when present. Rows without barcode use an empty sort key.
+    Equal keys retain input order, including duplicate rows. Optional metadata
+    columns retain their values and are never added or removed.
     Output uses LF line endings and every row ends with a newline. Source
     data are preserved, and an existing output is never overwritten.
 

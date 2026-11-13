@@ -1,4 +1,4 @@
-"""Local tools for fixed nine-column coverage files; missing fields are '.'."""
+"""Coverage tools with six required columns and optional trailing metadata."""
 
 from ._common import COV_COLUMNS
 from .conversion import convert_cov
