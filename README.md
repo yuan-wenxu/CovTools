@@ -2,7 +2,7 @@
 
 A lightweight Python package for converting, merging, sorting, indexing,
 querying, and splitting methylation coverage (`.cov`) files by barcode.
-All record processing uses a compiled C backend on Linux.
+Record validation and indexed lookup use a compiled C backend on Linux.
 
 ## File format
 
@@ -45,6 +45,7 @@ from covtools import (
     convert_cov,
     merge_cov,
     query_cov,
+    region_methylation,
     sort_cov,
     split_cov,
 )
@@ -61,6 +62,12 @@ for line in query_cov(sorted_path, "chr1", 100, 200, barcode="cell01"):
     print(line, end="")
 
 barcode_paths = split_cov(sorted_path, "split_cells")
+
+methylation = region_methylation(
+    sorted_path,
+    regions=[("chr1", 100, 200), ("chr2", 300, 400)],
+)
+# Alternatively: region_methylation(sorted_path, bed="regions.bed")
 ```
 
 Column selectors are also available through the Python API:

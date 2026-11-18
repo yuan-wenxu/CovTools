@@ -25,13 +25,13 @@ INDEX_COLUMNS = b"#chromosome\twindow\tstart_offset\tend_offset\n"
 def _index_range(
     path: Path, destination: Path, start: int, end: int,
     signature: tuple[int, int], bin_size: int,
-) -> tuple[Path, int, int]:
+) -> tuple[Path, int, int, tuple[bytes, int], tuple[bytes, int]]:
     with destination.open("xb") as output:
-        rows, _ = _native.index(
+        rows, _, first, last = _native.index(
             os.fsencode(path), output.fileno(), start, end, *signature,
             bin_size,
         )
-    return destination, rows, end - start
+    return destination, rows, end - start, first, last
 
 
 def _parallel_blocks(
@@ -42,6 +42,7 @@ def _parallel_blocks(
     """Join segment indexes, coalescing windows split by task boundaries."""
     ranges = _file_ranges(source, signature[0], workers)
     rows = 0
+    previous: tuple[bytes, int] | None = None
     index.flush()
     with (
         closing(_native.index_join(index.fileno())) as writer,
@@ -55,7 +56,13 @@ def _parallel_blocks(
         with closing(_ordered_results(
             _index_range, tasks, min(workers, len(ranges)),
         )) as results:
-            for part, row_count, byte_count in results:
+            for part, row_count, byte_count, first, last in results:
+                if previous is not None and first < previous:
+                    raise ValueError(
+                        "Coverage must be sorted by chromosome and position; "
+                        "run covtools sort"
+                    )
+                previous = last
                 writer.add(os.fsencode(part))
                 part.unlink()
                 rows += row_count
@@ -68,8 +75,12 @@ def build_index(
     workers: int = 1, temp_dir: str | Path | None = None,
     show_progress: bool = True,
 ) -> None:
-    """Index six-to-nine-column coverage using the C backend.
+    """Index sorted six-to-nine-column coverage using the C backend.
 
+    Chromosomes must be in UTF-8 byte lexicographic order, followed by
+    nondecreasing numeric positions, as produced by sort_cov. Barcode order
+    at equal positions is unrestricted. Unsorted input raises ValueError;
+    failed indexes are removed. Parallel segment boundaries are checked.
     Parallel segments produce temporary indexes under temp_dir and are joined
     in source order. temp_dir defaults to the input file's directory.
     Adjacent matching windows are coalesced. Set
@@ -113,7 +124,7 @@ def build_index(
                 index.write(INDEX_COLUMNS.decode("ascii"))
                 if workers == 1:
                     index.flush()
-                    rows, blocks = _native.index(
+                    rows, blocks, _, _ = _native.index(
                         os.fsencode(input_path), index.fileno(), 0,
                         signature[0], *signature, bin_size, progress.advance,
                     )

@@ -123,9 +123,10 @@ PyObject *cov_index(PyObject *self, PyObject *args) {
     }
     Context ctx = {.callback = callback}; Reader reader = {0};
     FILE *output = NULL;
-    char *chromosome = NULL;
-    size_t chromosome_length = 0;
+    char *chromosome = NULL, *first_chromosome = NULL;
+    size_t chromosome_length = 0, first_chromosome_length = 0;
     uint64_t window = 0, block_start = start, rows = 0, blocks = 0;
+    uint64_t first_position = 0, previous_position = 0;
     Py_BEGIN_ALLOW_THREADS
     if (reader_open(&ctx, &reader, path, start, end, size, mtime))
         output = output_fd(&ctx, fd);
@@ -137,6 +138,21 @@ PyObject *cov_index(PyObject *self, PyObject *args) {
         if (!utf8_valid(current)) {
             value_error(&ctx, "Invalid UTF-8 chromosome at byte %" PRIu64,
                         reader.offset); break;
+        }
+        int order = rows ? bytes_compare(
+            (Span){chromosome, chromosome_length}, current) : 0;
+        if (order > 0 || (!order && rows &&
+                          record->position < previous_position)) {
+            value_error(&ctx, "Coverage must be sorted by chromosome and "
+                        "position; run covtools sort (byte %" PRIu64 ")",
+                        reader.offset); break;
+        }
+        if (!rows) {
+            first_chromosome = malloc(current.len);
+            if (!first_chromosome) { memory_error(&ctx); break; }
+            memcpy(first_chromosome, current.data, current.len);
+            first_chromosome_length = current.len;
+            first_position = record->position;
         }
         uint64_t current_window = (record->position - 1) / bin_size;
         if (!rows || window != current_window ||
@@ -153,6 +169,7 @@ PyObject *cov_index(PyObject *self, PyObject *args) {
             memcpy(chromosome, current.data, current.len);
             window = current_window; block_start = reader.offset;
         }
+        previous_position = record->position;
         reader.offset += reader.length; rows++;
         if (!tick(&ctx, reader.length, 0)) break;
     }
@@ -165,11 +182,17 @@ PyObject *cov_index(PyObject *self, PyObject *args) {
     }
     if (output) finish_output(&ctx, output);
     if (!ctx.kind) tick(&ctx, 0, 1);
-    free(chromosome); reader_close(&reader);
+    reader_close(&reader);
     Py_END_ALLOW_THREADS
-    if (ctx.kind) return raise_error(&ctx);
-    return Py_BuildValue("KK", (unsigned long long)rows,
-                         (unsigned long long)blocks);
+    PyObject *result = ctx.kind ? raise_error(&ctx) : Py_BuildValue(
+        "KK(y#K)(y#K)", (unsigned long long)rows,
+        (unsigned long long)blocks,
+        first_chromosome, (Py_ssize_t)first_chromosome_length,
+        (unsigned long long)first_position,
+        chromosome, (Py_ssize_t)chromosome_length,
+        (unsigned long long)previous_position);
+    free(first_chromosome); free(chromosome);
+    return result;
 }
 
 typedef struct {
